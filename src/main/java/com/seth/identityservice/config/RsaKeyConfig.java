@@ -6,20 +6,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.text.ParseException;
 import java.util.UUID;
 
 /**
- * Generates (once) or loads the RSA signing key used for JWT issuance.
- *
- * The full JWK -- including private key material -- is persisted to a local,
- * gitignored file on first run so restarts don't invalidate every previously
- * issued token. In production this file's contents should come from a secret
- * store / env var instead of disk, but local-file bootstrap is fine for dev
- * and matches Phase 0 scope (scaffold + keypair only, no deployment yet).
+ * Resolves the RSA signing key, in priority order:
+ *   1. IDENTITY_SIGNING_KEY env var (full JWK JSON) -- production. Render's
+ *      filesystem is ephemeral, so a file-based key would regenerate on every
+ *      deploy and silently invalidate every issued token.
+ *   2. Local gitignored file -- dev. Generated on first run, reused after.
  */
 @Configuration
 public class RsaKeyConfig {
@@ -27,22 +23,34 @@ public class RsaKeyConfig {
     @Value("${identity.keys.path}")
     private String keysPath;
 
-    @Bean
-    public RSAKey rsaKey() throws IOException, ParseException, java.security.NoSuchAlgorithmException, com.nimbusds.jose.JOSEException {
-        Path path = Path.of(keysPath);
+    @Value("${identity.keys.json:}")
+    private String keyJson;
 
+    @Bean
+    public RSAKey rsaKey() throws Exception {
+        if (keyJson != null && !keyJson.isBlank()) {
+            RSAKey key = RSAKey.parse(keyJson);
+            if (!key.isPrivate()) {
+                throw new IllegalStateException(
+                        "IDENTITY_SIGNING_KEY must include private key material (d, p, q)");
+            }
+            return key;
+        }
+
+        Path path = Path.of(keysPath);
         if (Files.exists(path)) {
-            String json = Files.readString(path);
-            return RSAKey.parse(json);
+            return RSAKey.parse(Files.readString(path));
         }
 
         RSAKey generated = new RSAKeyGenerator(2048)
                 .keyID(UUID.randomUUID().toString())
                 .generate();
 
-        Files.createDirectories(path.getParent() == null ? Path.of(".") : path.getParent());
+        Path parent = path.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
         Files.writeString(path, generated.toJSONString());
-
         return generated;
     }
 }
